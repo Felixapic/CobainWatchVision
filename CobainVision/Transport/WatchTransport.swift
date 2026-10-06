@@ -59,6 +59,10 @@ enum WatchTransportEvent {
 protocol WatchTransport: AnyObject {
     var events: AsyncStream<WatchTransportEvent> { get }
     var isReachable: Bool { get }
+    var activationState: String { get }
+    var isPaired: Bool { get }
+    var isWatchAppInstalled: Bool { get }
+    var lastError: String? { get }
     var disconnectCount: Int { get }
     var droppedMessageCount: Int { get }
     var medianLatencyMs: Double { get }
@@ -76,6 +80,11 @@ protocol WatchTransport: AnyObject {
 final class WCSessionTransport: NSObject, WatchTransport, ObservableObject {
 
     @Published private(set) var isReachable: Bool = false
+    @Published private(set) var activationState: String = "notActivated"
+    @Published private(set) var isPaired: Bool = false
+    @Published private(set) var isWatchAppInstalled: Bool = false
+    @Published private(set) var lastError: String? = nil
+
     @Published private(set) var disconnectCount: Int = 0
     @Published private(set) var droppedMessageCount: Int = 0
     @Published private(set) var medianLatencyMs: Double = 0
@@ -257,7 +266,28 @@ extension WCSessionTransport: WCSessionDelegate {
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         Task { @MainActor in
+            let stateStr: String
+            switch activationState {
+            case .activated: stateStr = "activated"
+            case .inactive: stateStr = "inactive"
+            case .notActivated: stateStr = "notActivated"
+            @unknown default: stateStr = "unknown"
+            }
+
+            self.activationState = stateStr
             self.isReachable = session.isReachable
+            self.lastError = error?.localizedDescription
+
+            #if os(iOS)
+            self.isPaired = session.isPaired
+            self.isWatchAppInstalled = session.isWatchAppInstalled
+            #else
+            self.isPaired = true
+            self.isWatchAppInstalled = true
+            #endif
+
+            print("[WCSessionStatus] activationState=\(stateStr), isReachable=\(session.isReachable), isPaired=\(self.isPaired), isWatchAppInstalled=\(self.isWatchAppInstalled), error=\(self.lastError ?? "nil")")
+
             self.continuation?.yield(.reachabilityChanged(session.isReachable))
         }
     }
@@ -270,6 +300,7 @@ extension WCSessionTransport: WCSessionDelegate {
                 self.continuation?.yield(.disconnected)
             }
             self.isReachable = reachable
+            print("[WCSessionStatus] reachabilityDidChange isReachable=\(reachable)")
             self.continuation?.yield(.reachabilityChanged(reachable))
         }
     }
@@ -288,9 +319,26 @@ extension WCSessionTransport: WCSessionDelegate {
     }
 
     #if os(iOS)
-    func sessionDidBecomeInactive(_ session: WCSession) {}
+    func sessionWatchStateDidChange(_ session: WCSession) {
+        Task { @MainActor in
+            self.isPaired = session.isPaired
+            self.isWatchAppInstalled = session.isWatchAppInstalled
+            print("[WCSessionStatus] watchStateDidChange isPaired=\(session.isPaired), isWatchAppInstalled=\(session.isWatchAppInstalled)")
+        }
+    }
+
+    func sessionDidBecomeInactive(_ session: WCSession) {
+        Task { @MainActor in
+            self.activationState = "inactive"
+            print("[WCSessionStatus] sessionDidBecomeInactive")
+        }
+    }
 
     func sessionDidDeactivate(_ session: WCSession) {
+        Task { @MainActor in
+            self.activationState = "notActivated"
+            print("[WCSessionStatus] sessionDidDeactivate")
+        }
         WCSession.default.activate()
     }
     #endif
@@ -304,6 +352,10 @@ extension WCSessionTransport: WCSessionDelegate {
 final class NullWatchTransport: WatchTransport {
     let events: AsyncStream<WatchTransportEvent> = AsyncStream { _ in }
     var isReachable: Bool { false }
+    var activationState: String { "notActivated" }
+    var isPaired: Bool { false }
+    var isWatchAppInstalled: Bool { false }
+    var lastError: String? { nil }
     var disconnectCount: Int { 0 }
     var droppedMessageCount: Int { 0 }
     var medianLatencyMs: Double { 0 }

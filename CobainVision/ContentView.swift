@@ -281,6 +281,25 @@ private struct WatchLiveDebugPanel: View {
             }
             Divider().background(.white.opacity(0.3))
 
+            // WCSession Status Fields
+            VStack(alignment: .leading, spacing: 1) {
+                Text("WCSession Status:")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.yellow)
+                Text("• State: \(transport.activationState)")
+                Text("• Paired: \(transport.isPaired ? "Yes" : "No")")
+                Text("• AppInstalled: \(transport.isWatchAppInstalled ? "Yes" : "No")")
+                Text("• Reachable: \(transport.isReachable ? "Yes" : "No")")
+                if let err = transport.lastError {
+                    Text("• Error: \(err)")
+                        .foregroundStyle(.red)
+                } else {
+                    Text("• Error: none")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Divider().background(.white.opacity(0.3))
+
             // Motion & Features
             if let s = sample {
                 Text(String(format: "Pitch: %.1f° | Mag: %.2f g", s.forearmPitch * 180.0 / .pi, s.motionMagnitude))
