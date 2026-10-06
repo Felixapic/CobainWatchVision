@@ -95,14 +95,39 @@ enum AppConfig {
 
     static let defaultDetectionMode: DetectionMode = .cameraOnly
 
-    // ─── Debug overlay ────────────────────────────────────────────────────────
-
     /// Show the skeleton overlay on launch.
     static let debugOverlayEnabledByDefault: Bool = true
 
-    // ─── FPS rolling average ──────────────────────────────────────────────────
-
     /// Exponential moving average weight for FPS display (0…1).
-    /// Higher = more responsive; lower = smoother.
     static let fpsEMAWeight: Double = 0.1
+
+    // ─── Milestone W-LITE Watch & Fusion Thresholds ───────────────────────────
+
+    /// Joint confidence below this threshold means the camera is "unsure".
+    /// Rationale: Joint confidence in [0.30, 0.40) indicates noisy camera detection where watch data can assist recovery.
+    static let cameraUnsureMinConfidence: Float = 0.40
+
+    /// Watch arm pitch offset from calibrated arm-up pose required for "watch strong".
+    /// Rationale: Pitch within ~0.50 radians (~28.6°) of calibrated arm-up confirms a clear, full arm raise.
+    static let watchStrongArmRaisePitchOffset: Double = 0.50
+
+    /// User acceleration magnitude (in g) below which the wrist is considered "still".
+    /// Rationale: Acceleration magnitude < 0.15 g indicates no significant wrist movement/shaking.
+    static let watchStillMotionMagnitudeThreshold: Double = 0.15
+
+    /// Watch pitch delta from calibrated arm-down baseline for "watch consistent".
+    /// Rationale: Pitch elevation > 0.40 radians (~23°) from baseline confirms movement consistent with camera detection.
+    static let watchConsistentArmRaiseDelta: Double = 0.40
+
+    /// Frequency (in Hz) for streaming low-rate feature vectors (arm pitch + motion magnitude) over WatchConnectivity.
+    /// Rationale: 15 Hz provides responsive feature tracking without overwhelming WatchConnectivity message bandwidth.
+    static let watchMotionStreamRateHz: Double = 15.0
+
+    /// Interval in seconds for ping-pong round-trip latency & clock offset checks during a run.
+    /// Rationale: 30-second interval tracks latency median/P95 and clock drift without spamming transport.
+    static let pingPongIntervalSeconds: Double = 30.0
+
+    /// Haptic feedback toggle (default OFF per Amendment 1).
+    /// Rationale: Prevents haptics from biasing wrist movement during baseline measurement runs.
+    static let hapticEnabledByDefault: Bool = false
 }

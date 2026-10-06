@@ -1,8 +1,7 @@
 // ContentView.swift
-// MovementPrompt PoC — M1
+// MovementPrompt PoC — Milestone W-LITE Stage 1
 //
-// Root view: camera preview (mirrored) + debug overlay + gesture HUD + controls.
-// PoC disclaimer is always visible per the brief.
+// Root view: camera preview (mirrored) + debug overlay + gesture HUD + Stage 1 Watch Debug Panel.
 
 import SwiftUI
 import AVFoundation
@@ -17,14 +16,23 @@ struct ContentView: View {
     @StateObject private var poseProvider = VisionPoseProvider()
     @StateObject private var gestureEngine = GestureEngine()
     @StateObject private var logger = SessionLogger()
+    @StateObject private var watchTransport = WCSessionTransport()
 
     // ── Local state ───────────────────────────────────────────────────────────
     @State private var currentFrame: PoseFrame?
     @State private var isRunning = false
     @State private var showOverlay = AppConfig.debugOverlayEnabledByDefault
+    @State private var showWatchDebug = true
     @State private var errorMessage: String?
     @State private var exportMessage: String?
     @State private var frameTask: Task<Void, Never>?
+
+    // Stage 1 Watch Live Debug States
+    @State private var latestWatchSample: WatchFeatureSample?
+    @State private var watchArmRaised: Bool = false
+    @State private var watchWristShaking: Bool = false
+    @State private var watchHR: Double?
+    @State private var watchCalibrationText: String = "Uncalibrated"
 
     var body: some View {
         ZStack {
@@ -43,7 +51,25 @@ struct ContentView: View {
                 .ignoresSafeArea()
             }
 
-            // ── Controls ──────────────────────────────────────────────────
+            // ── Stage 1 Watch Debug Panel (Top-Right) ─────────────────────
+            if showWatchDebug {
+                VStack(alignment: .trailing, spacing: 4) {
+                    WatchLiveDebugPanel(
+                        transport: watchTransport,
+                        sample: latestWatchSample,
+                        armRaised: watchArmRaised,
+                        wristShaking: watchWristShaking,
+                        heartRate: watchHR,
+                        calibrationText: watchCalibrationText,
+                        onPing: { watchTransport.sendPing() }
+                    )
+                }
+                .padding(.top, 40)
+                .padding(.trailing, 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            }
+
+            // ── Controls & HUD ────────────────────────────────────────────
             VStack {
                 // PoC disclaimer — always visible
                 Text("PoC – not medical advice")
@@ -97,6 +123,17 @@ struct ContentView: View {
                             .clipShape(Circle())
                     }
 
+                    // Watch Debug Panel toggle
+                    Button {
+                        showWatchDebug.toggle()
+                    } label: {
+                        Image(systemName: showWatchDebug ? "applewatch" : "applewatch.slash")
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(.white.opacity(0.2))
+                            .clipShape(Circle())
+                    }
+
                     // Export CSV
                     Button {
                         exportCSV()
@@ -125,7 +162,11 @@ struct ContentView: View {
             }
         }
         .background(.black)
-        .task { startSession() }
+        .task {
+            try? await watchTransport.activate()
+            startSession()
+            listenToWatchEvents()
+        }
         .onDisappear { stopSession() }
     }
 
@@ -167,6 +208,41 @@ struct ContentView: View {
         isRunning = false
     }
 
+    private func listenToWatchEvents() {
+        Task {
+            for await event in watchTransport.events {
+                await MainActor.run {
+                    switch event {
+                    case .sample(let sample):
+                        self.latestWatchSample = sample
+                        if let hr = sample.heartRate { self.watchHR = hr }
+
+                    case .armRaiseDetected(_, _):
+                        self.watchArmRaised = true
+
+                    case .armRaiseEnded(_, _):
+                        self.watchArmRaised = false
+
+                    case .wristShakeDiagnostic(_, _):
+                        self.watchWristShaking = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            self.watchWristShaking = false
+                        }
+
+                    case .heartRateUpdated(let bpm):
+                        self.watchHR = bpm
+
+                    case .calibrationUpdated(let side, let down, let up):
+                        self.watchCalibrationText = "\(side.rawValue.capitalized) (Down: \(String(format:"%.1f", down)) rad, Up: \(String(format:"%.1f", up)) rad)"
+
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+    }
+
     private func exportCSV() {
         do {
             let (framesURL, eventsURL) = try logger.exportCSV()
@@ -174,6 +250,92 @@ struct ContentView: View {
         } catch {
             errorMessage = "Export failed: \(error.localizedDescription)"
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - WatchLiveDebugPanel
+// ─────────────────────────────────────────────────────────────────────────────
+
+private struct WatchLiveDebugPanel: View {
+    @ObservedObject var transport: WCSessionTransport
+    let sample: WatchFeatureSample?
+    let armRaised: Bool
+    let wristShaking: Bool
+    let heartRate: Double?
+    let calibrationText: String
+    let onPing: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Image(systemName: "applewatch")
+                Text("Watch Live Debug")
+                    .bold()
+                Spacer()
+                Circle()
+                    .fill(transport.isReachable ? Color.green : Color.red)
+                    .frame(width: 8, height: 8)
+                Text(transport.isReachable ? "Reachable" : "Unreachable")
+                    .font(.caption2)
+            }
+            Divider().background(.white.opacity(0.3))
+
+            // Motion & Features
+            if let s = sample {
+                Text(String(format: "Pitch: %.1f° | Mag: %.2f g", s.forearmPitch * 180.0 / .pi, s.motionMagnitude))
+                Text("Seq: \(s.sequenceNumber) | Wrist: \(s.wristSide.rawValue.capitalized)")
+            } else {
+                Text("Waiting for Watch 15 Hz stream...")
+                    .foregroundStyle(.gray)
+            }
+
+            // State & HR
+            HStack {
+                Text("Arm: \(armRaised ? "RAISED" : "IDLE")")
+                    .foregroundStyle(armRaised ? Color.green : Color.gray)
+                    .bold()
+                if let hr = heartRate {
+                    Text("• HR: \(Int(hr)) BPM")
+                        .foregroundStyle(.red)
+                }
+            }
+
+            if wristShaking {
+                Text("⚠️ Wrist Shake (Diagnostic)")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.yellow)
+            }
+
+            Text("Cal: \(calibrationText)")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            Divider().background(.white.opacity(0.3))
+
+            // Transport Reliability Stats
+            Text(String(format: "Latency: Med %.0f ms | P95 %.0f ms", transport.medianLatencyMs, transport.p95LatencyMs))
+            Text(String(format: "Clock Offset: %+.2f s", transport.clockOffsetSeconds))
+            Text("Dropped Msgs: \(transport.droppedMessageCount) | Disconnects: \(transport.disconnectCount)")
+
+            HStack {
+                Button(action: onPing) {
+                    Text("Ping Watch")
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.blue)
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.top, 2)
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(.white)
+        .padding(8)
+        .background(.black.opacity(0.75))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .frame(width: 220)
     }
 }
 
@@ -204,9 +366,6 @@ private struct EventBadge: View {
 // MARK: - CameraPreviewView (UIViewRepresentable)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Wraps `AVCaptureVideoPreviewLayer` in SwiftUI.
-/// The preview layer is mirrored (standard front-camera mirror behaviour).
-/// The data output is NOT mirrored — see VisionPoseProvider for details.
 struct CameraPreviewView: UIViewRepresentable {
 
     let session: AVCaptureSession
@@ -222,8 +381,6 @@ struct CameraPreviewView: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewUIView, context: Context) {
         uiView.updateLayout()
     }
-
-    // ── Inner UIView ──────────────────────────────────────────────────────────
 
     final class PreviewUIView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }

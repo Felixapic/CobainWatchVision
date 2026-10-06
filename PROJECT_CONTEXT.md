@@ -3,6 +3,16 @@
 
 ---
 
+## Environment & Target Setup
+- **Xcode**: 27.0
+- **iPhone**: iPhone 17 (iOS 26.5.2)
+- **Apple Watch**: Series 11 (watchOS 26.6)
+- **iOS Target**: `CobainVision`
+- **Watch Target**: `watchDetect Watch App`
+- **Developer Account**: Free / Personal Team
+
+---
+
 ## Research Questions
 | # | Question |
 |---|----------|
@@ -16,140 +26,95 @@
 ## Architecture Decisions
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Pose source | `PoseProvider` protocol | Decouples Vision impl; allows future sources (ARKit, mock) |
-| Coordinate system | Vision normalised (origin bottom-left, y increases UP) | All rules written in Vision space; documented per gesture |
-| Front-camera mirror | `videoRotationAngle = 90` on data output; pass `.up` to VNImageRequestHandler | Pixel buffer arrives portrait, unmirrored. Vision `leftXxx` = person's RIGHT side. Gesture rules comment this explicitly. |
-| Overlay x-flip | `screen_x = (1 − vision_x) × width` | Matches the mirrored preview layer |
-| Hysteresis | N enter frames / M exit frames, per gesture | Single config file |
+| Pose source | `PoseProvider` protocol | Decouples Vision impl; allows mock / future sources |
+| Coordinate system | Vision normalised (origin bottom-left, y increases UP) | All rules written in Vision space |
+| Front-camera orientation | `videoOrientation = .portrait` on data output; `orientation: .up` in `VNImageRequestHandler` | Delivers upright portrait frames |
+| Overlay x-flip | `screen_x = (1 − vision_x) × width` | Matches the mirrored front camera preview layer |
+| Hysteresis | N enter frames / M exit frames, per gesture | Configurable via `AppConfig.swift` |
 | Normalisation | Shoulder-to-hip torso length | Invariant to distance; nil if < minTorsoLength |
-| Config | `AppConfig.swift` enum | All magic numbers in one place |
-| Log schema | Watch sample slots from day one (nil in M1) | No migration needed in M3 |
-| Transport | `WatchTransport` protocol (empty in M1) | WatchConnectivity plugged in M3 |
-| Detection mode | `DetectionMode` enum | cameraOnly / watchOnly / fusion |
-| Third-party deps | None | Per brief |
-| Privacy | Camera frames never saved; only joint coords + derived metrics logged | Per brief |
+| Config | `AppConfig.swift` enum | All tuneable thresholds in one single file |
+| Log schema | JSON lines per event (prompts, detections, verdicts, watch state) | Structured, human-readable, easy to parse |
+| Transport | `WatchConnectivity` (`WCSession`) | Real-time event/feature messaging between iPhone & Watch |
+| Background Watch execution | `HKWorkoutSession` + `HKLiveWorkoutBuilder` | Keeps watchOS app running in background during session |
+| Detection mode | Dual simultaneous detection + Fusion | cameraOnly, watchOnly, and 4-state fusion rules |
 
 ---
 
 ## File Map
 
 ```
-CobainVision/                          <- Xcode target root (PBXFileSystemSynchronizedRootGroup)
+CobainVision/                          <- Xcode project root
 ├── Config/
-│   ├── AppConfig.swift                all tuneable values
+│   ├── AppConfig.swift                All tuneable thresholds, frame rates, and script parameters
 │   └── DetectionMode.swift            cameraOnly / watchOnly / fusion enum
 ├── Pose/
-│   ├── PoseProvider.swift             protocol
-│   ├── PoseFrame.swift                snapshot of joints for one frame
-│   └── VisionPoseProvider.swift       AVCapture + Vision implementation
+│   ├── PoseProvider.swift             Protocol for pose providers
+│   ├── PoseFrame.swift                Snapshot of body joints for one frame
+│   └── VisionPoseProvider.swift       AVCaptureSession + Vision implementation
 ├── Gestures/
-│   ├── GestureEvent.swift             event model (source, kind, timestamp)
-│   ├── GestureDefinitions.swift       5 gestures: rules, joints, failure notes
-│   └── GestureEngine.swift            state machine + hysteresis + framing check
+│   ├── GestureEvent.swift             Event model (type, source, kind, timestamp)
+│   ├── GestureDefinitions.swift       5 gestures: rules, required joints, failure modes
+│   └── GestureEngine.swift            State machine, hysteresis & framing evaluation
 ├── Logging/
-│   └── SessionLogger.swift            log schema, CSV writer, watch slots
+│   └── SessionLogger.swift            Per-event JSON log recorder & ShareSheet exporter
 ├── Transport/
-│   └── WatchTransport.swift           protocol stub (M1); WatchConnectivity in M3
+│   └── WatchTransport.swift           WCSession wrapper for iPhone/Watch messaging
 ├── Overlay/
-│   └── DebugOverlayView.swift         skeleton, confidences, FPS, gesture states
+│   └── DebugOverlayView.swift         Skeleton canvas, joint confidence HUD, FPS & gesture status
 └── App/
-    ├── CobainVisionApp.swift          @main (existing, untouched)
-    └── ContentView.swift              camera + overlay + controls
+    ├── CobainVisionApp.swift          @main entry point
+    └── ContentView.swift              Camera preview, overlay, script runner, live counters & summary UI
 
-CobainVisionTests/                     <- XCTest target (add manually, see Setup)
-├── GestureEngineTests.swift
-└── NormalizationTests.swift
+watchDetect Watch App/                 <- watchOS app target
+├── watchDetectApp.swift               watchOS @main entry point
+├── WatchWorkoutManager.swift          HealthKit HKWorkoutSession & CMMotionManager device motion
+├── WatchMotionDetector.swift          Forearm pitch & wrist shake detection algorithms
+└── WatchContentView.swift             Calibration UI, HR display, wrist side selection & status
 ```
 
 ---
 
-## Gesture Definitions Summary
-| Gesture | Vision joints used | Rule (Vision space) | Known failures |
-|---------|-------------------|---------------------|----------------|
-| Right arm raise | left{Shoulder,Elbow,Wrist} | wristY > shoulderY + ratio*torso | Occluded when arm crosses body |
-| Left arm raise | right{Shoulder,Elbow,Wrist} | wristY > shoulderY + ratio*torso | Same |
-| Both-arm lateral | all arm joints | both arms pass raise rule simultaneously | Needs full upper body in frame |
-| Right high knee | leftHip, leftKnee | kneeY > hipY + ratio*torso | Low confidence common; degrades if feet out of frame |
-| Left high knee | rightHip, rightKnee | same, mirrored | Same |
-| Squat | hips + knees + ankles | (hipMidY - ankleMidY) / torso < squatRatio | Most fragile: all lower joints needed |
-
-Vision leftXxx = person's RIGHT. rightXxx = person's LEFT. (Front camera raw buffer is unmirrored.)
+## Current Gesture Definitions & Thresholds
+| Gesture | Vision Joints Used | Rule (Vision Space) | Key Threshold | Known Failures |
+|---------|-------------------|---------------------|---------------|----------------|
+| Right Arm Raise | `.rightShoulder`, `.rightElbow`, `.rightWrist` | `(wrist.y - shoulder.y) / torso > ratio` AND `(elbow.y - shoulder.y) / torso > ratio` | `armRaiseWristAboveShoulderRatio = 0.25`, `armRaiseElbowAboveShoulderRatio = 0.10` | Arm behind head drops elbow; arm crossing body occludes wrist |
+| Left Arm Raise | `.leftShoulder`, `.leftElbow`, `.leftWrist` | Same as Right Arm Raise | Same | Same |
+| Both-Arm Lateral | All 6 arm joints | `leftArmRaise` AND `rightArmRaise` simultaneously | Same | One arm out of frame -> false; body lean shifts torso length |
+| Right High Knee | `.rightHip`, `.rightKnee` | `(knee.y - hip.y) / torso > ratio` | `highKneeKneeAboveHipRatio = 0.15` | Low confidence common; camera at chest height misses knees/ankles |
+| Left High Knee | `.leftHip`, `.leftKnee` | Same as Right High Knee | Same | Same |
+| Squat | `.leftHip`, `.rightHip`, `.leftAnkle`, `.rightAnkle` | `(hipMidY - ankleMidY) / torso < ratio` | `squatHipAnkleRatio = 1.6` | Most fragile: requires all lower-body joints visible |
 
 ---
 
 ## Setup & How to Run
 
 ### Prerequisites
-- Xcode 26 (or later)
-- Real iPhone running iOS 26+ (Simulator has no camera)
-- Your Apple Developer Team ID
+- Xcode 27.0
+- Real iPhone (iOS 26.5.2) + Apple Watch (watchOS 26.6)
+- Free or Paid Apple Developer Account (set signing team on targets)
 
-### Steps
-1. Open `CobainVision.xcodeproj`.
-2. Target -> Signing -> set your Team.
-3. Add `NSCameraUsageDescription` to the generated Info.plist:
-   - Target -> Info tab -> add **Privacy - Camera Usage Description**
-   - Value: "Movement Prompt PoC uses the camera to detect body pose. No video is saved."
-4. Build & run on a real iPhone (Cmd+R).
-
-### Add the Test Target (one-time)
-1. File -> New -> Target -> Unit Testing Bundle, name it `CobainVisionTests`.
-2. Add `GestureEngineTests.swift` and `NormalizationTests.swift` to the target.
-3. Cmd+U to run (Simulator is fine for unit tests).
-
-### What to test by hand (M1)
-- Stand in front of the iPhone propped up at ~arm's length.
-- Tap **Start** — the debug skeleton should appear over your body.
-- Raise right arm above shoulder -> Right Arm Raise indicator turns green.
-- Raise left arm -> Left Arm Raise turns green.
-- Raise both arms -> Both Arm Lateral turns green.
-- Lift right knee -> Right High Knee (may be unreliable if waist-down out of frame).
-- Lift left knee -> Left High Knee.
-- Perform a squat (step back so full body is visible) -> Squat.
-- FPS should be ~30 on modern iPhones; may be lower on older hardware.
+### Running the App
+1. Open `CobainVision.xcodeproj` in Xcode.
+2. Select target `CobainVision` and destination your paired iPhone.
+3. Build and Run (Cmd+R).
+4. The watchOS app `watchDetect Watch App` installs automatically on the paired Apple Watch.
+5. Grant Camera, HealthKit, and Motion permissions on devices when prompted.
 
 ---
 
-## Known Limitations (M1)
-- No watch integration (M3).
-- No script / test harness (M2).
-- No CSV export (M2).
-- Squat / high-knee degrades when knees/ankles are outside the frame.
-- No calibration for squat threshold — absolute value only in M1.
-- Portrait orientation assumed; rotating the device is not handled.
+## Known Limitations & Risks
+- **Simulator limitations**:
+  - iPhone Simulator has no camera hardware -> camera pose detection requires physical iPhone.
+  - WatchConnectivity messaging and HealthKit workout sessions require real paired Apple Watch hardware for accurate latency & motion testing.
+- **Lower-body visibility**:
+  - High knee and Squat detection depend heavily on user standing far enough back for knees/ankles to be in frame.
+- **Watch arm-gesture scope**:
+  - Watch motion detection applies ONLY to arm gestures (right/left arm raise depending on wrist side). Leg and head gestures are camera-only and marked N/A on watch.
 
 ---
 
-## Current Status
+## Milestone Status
 | Milestone | Status |
 |-----------|--------|
-| M1 — Camera only | ✅ Source complete — build and test on device |
-| M2 — Test harness | Not started |
-| M3 — Watch + fusion | Not started |
-
----
-
-## Assumptions
-| # | Assumption |
-|---|-----------|
-| A1 | Portrait orientation only (M1). |
-| A2 | Front camera only. |
-| A3 | Bundle ID `practiceApp.CobainVision` (from existing project). |
-| A4 | Vision `.accurate` model by default; configurable in `AppConfig`. |
-| A5 | Replay tool will be a separate Swift executable target (M2). |
-| A6 | No changes specified when plan was approved; implemented as designed. |
-
----
-
-## Suggested git commit (M1)
-```
-feat(M1): camera-only pose detection with Vision + GestureEngine
-
-- PoseProvider protocol + VisionPoseProvider (AVCapture, VNDetectHumanBodyPoseRequest)
-- GestureEngine state machine: 5 gestures, hysteresis, torso normalisation
-- Debug overlay: skeleton, per-joint confidence colours, FPS, gesture states
-- SessionLogger with watch-sample slots (nil in M1)
-- WatchTransport protocol stub
-- AppConfig: single source of truth for all thresholds
-- Unit tests: GestureEngineTests, NormalizationTests
-```
+| M1 — Camera Pose & Gestures | ✅ Completed |
+| Milestone W-LITE — Apple Watch + Simple Fusion | ⏳ Step 0 Complete — Awaiting Plan Approval |
