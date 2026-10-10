@@ -94,6 +94,8 @@ final class WCSessionTransport: NSObject, WatchTransport, ObservableObject {
     let events: AsyncStream<WatchTransportEvent>
     private var continuation: AsyncStream<WatchTransportEvent>.Continuation?
 
+    public var onRawMessageReceived: (([String: Any]) -> Void)?
+
     private var latencyHistory: [Double] = []
     private var lastSequenceNumber: Int = -1
     private var pingTimer: Timer?
@@ -159,6 +161,7 @@ final class WCSessionTransport: NSObject, WatchTransport, ObservableObject {
 
     private func processIncomingPayload(_ dict: [String: Any]) {
         guard let type = dict["type"] as? String else { return }
+        onRawMessageReceived?(dict)
 
         switch type {
         case "feature":

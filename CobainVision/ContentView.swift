@@ -18,6 +18,14 @@ struct ContentView: View {
     @StateObject private var logger = SessionLogger()
     @StateObject private var watchTransport = WCSessionTransport()
 
+    // Stage A1 Research Rig Hub State
+    @StateObject private var macTransport = MacNetworkTransport()
+    @StateObject private var thighDetector = ThighMotionDetector()
+    @State private var isHubModeActive = false
+    @State private var isTouchLocked = false
+    @State private var manualMacIP = ""
+    @State private var manualMacPort = "12345"
+
     // ── Local state ───────────────────────────────────────────────────────────
     @State private var currentFrame: PoseFrame?
     @State private var isRunning = false
@@ -69,6 +77,119 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
 
+            // ── Stage A1 iPhone Thigh Hub Overlay ─────────────────────────
+            if isHubModeActive {
+                VStack(spacing: 12) {
+                    Text("⚠️ MUST REMAIN IN FOREGROUND")
+                        .font(.caption)
+                        .bold()
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(Color.yellow)
+                        .clipShape(Capsule())
+
+                    Text("iPhone Thigh Hub Mode")
+                        .font(.headline)
+                        .bold()
+                        .foregroundStyle(.white)
+
+                    Text("Angle: \(String(format: "%.1f°", thighDetector.currentThighAngleDegrees)) | Motion: \(String(format: "%.2f g", thighDetector.currentMotionMagnitude))")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.green)
+
+                    Text("Mac Link: \(macTransport.state.rawValue.capitalized) | RTT: \(String(format: "%.1f ms", macTransport.medianRTTMs))")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+
+                    // Thigh Calibration Buttons
+                    HStack(spacing: 10) {
+                        Button("Calibrate Standing") {
+                            thighDetector.calibrateStanding()
+                        }
+                        .font(.caption2)
+                        .padding(6)
+                        .background(Color.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                        Button("Calibrate Leg Raised") {
+                            thighDetector.calibrateLegRaised()
+                        }
+                        .font(.caption2)
+                        .padding(6)
+                        .background(Color.green)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    // Manual Connection Fallback Input
+                    HStack(spacing: 6) {
+                        TextField("Mac IP (e.g. 192.168.1.50)", text: $manualMacIP)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .frame(width: 170)
+                        TextField("Port", text: $manualMacPort)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .frame(width: 50)
+                        Button("Connect") {
+                            let port = UInt16(manualMacPort) ?? 12345
+                            macTransport.startClient(manualHost: manualMacIP, manualPort: port)
+                        }
+                        .font(.caption2)
+                        .padding(6)
+                        .background(Color.orange)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    // Touch Lock Button
+                    Button(action: { isTouchLocked = true }) {
+                        Label("Lock Screen for Thigh Strap", systemImage: "lock.fill")
+                            .font(.system(.caption, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.purple)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(12)
+                .background(Color.black.opacity(0.85))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .padding(.top, 90)
+                .frame(maxWidth: 320)
+            }
+
+            // ── Full-Screen Touch Lock Overlay ─────────────────────────────
+            if isTouchLocked {
+                ZStack {
+                    Color.black.opacity(0.92)
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 16) {
+                        Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.yellow)
+
+                        Text("TOUCH LOCK ACTIVE")
+                            .font(.title2)
+                            .bold()
+                            .foregroundStyle(.white)
+
+                        Text("Phone is locked for thigh strapping.\nPRESS & HOLD FOR 2 SECONDS TO UNLOCK.")
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.gray)
+
+                        Text("Hub State: Streaming to Mac Dashboard...")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                    }
+                }
+                .onLongPressGesture(minimumDuration: 2.0) {
+                    isTouchLocked = false
+                }
+            }
+
             // ── Controls & HUD ────────────────────────────────────────────
             VStack {
                 // PoC disclaimer — always visible
@@ -83,19 +204,27 @@ struct ContentView: View {
 
                 Spacer()
 
-                // Gesture event feed (last 4 events)
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(gestureEngine.sessionEvents.suffix(4).reversed()) { event in
-                        EventBadge(event: event)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Spacer().frame(height: 16)
-
                 // Bottom controls
-                HStack(spacing: 16) {
+                HStack(spacing: 12) {
+                    // Hub Mode Toggle
+                    Button {
+                        isHubModeActive.toggle()
+                        UIApplication.shared.isIdleTimerDisabled = isHubModeActive
+                        if isHubModeActive {
+                            thighDetector.start()
+                            macTransport.startClient()
+                        } else {
+                            thighDetector.stop()
+                            macTransport.stop()
+                        }
+                    } label: {
+                        Image(systemName: isHubModeActive ? "antenna.radiowaves.left.and.right.circle.fill" : "antenna.radiowaves.left.and.right")
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(isHubModeActive ? Color.purple : Color.white.opacity(0.2))
+                            .clipShape(Circle())
+                    }
+
                     // Start / Stop
                     Button {
                         isRunning ? stopSession() : startSession()
@@ -106,7 +235,7 @@ struct ContentView: View {
                         )
                         .font(.system(.body, weight: .semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
+                        .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .background(isRunning ? Color.red : Color.green)
                         .clipShape(Capsule())
@@ -161,13 +290,76 @@ struct ContentView: View {
                 }
             }
         }
-        .background(.black)
         .task {
             try? await watchTransport.activate()
             startSession()
             listenToWatchEvents()
+            setupHubRelays()
+            setupBackgroundNotificationObservers()
         }
-        .onDisappear { stopSession() }
+        .onDisappear {
+            stopSession()
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    private func setupHubRelays() {
+        // Thigh motion sample -> Mac Transport
+        thighDetector.onSampleEmitted = { sample in
+            guard isHubModeActive, let sampleData = try? JSONEncoder().encode(sample),
+                  let sampleStr = String(data: sampleData, encoding: .utf8) else { return }
+
+            let msg = HubTransportMessage(
+                type: .thighSample,
+                sourceId: "iphone_hub",
+                sequenceNumber: sample.sequenceNumber,
+                timestamp: sample.timestamp,
+                payloadJSON: sampleStr
+            )
+            macTransport.send(msg)
+        }
+
+        // Watch raw message -> Mac Transport Relay
+        watchTransport.onRawMessageReceived = { rawDict in
+            guard isHubModeActive, let jsonData = try? JSONSerialization.data(withJSONObject: rawDict),
+                  let jsonStr = String(data: jsonData, encoding: .utf8) else { return }
+
+            let msg = HubTransportMessage(
+                type: .watchSampleRelay,
+                sourceId: "watch_relay",
+                sequenceNumber: (rawDict["seq"] as? Int) ?? 0,
+                timestamp: Date().timeIntervalSince1970,
+                payloadJSON: jsonStr
+            )
+            macTransport.send(msg)
+        }
+    }
+
+    private func setupBackgroundNotificationObservers() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            guard self.isHubModeActive else { return }
+            let status = HubStatusMessage(
+                timestamp: Date().timeIntervalSince1970,
+                state: .paused,
+                note: "iPhone app moved to background / inactive"
+            )
+            if let data = try? JSONEncoder().encode(status),
+               let str = String(data: data, encoding: .utf8) {
+
+                let msg = HubTransportMessage(
+                    type: .hubStatus,
+                    sourceId: "iphone_hub",
+                    sequenceNumber: 0,
+                    timestamp: Date().timeIntervalSince1970,
+                    payloadJSON: str
+                )
+                self.macTransport.send(msg)
+            }
+        }
     }
 
     // ─── Session control ─────────────────────────────────────────────────────
